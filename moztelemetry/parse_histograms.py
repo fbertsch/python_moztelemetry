@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import shared_telemetry_utils as utils
+import yaml
 
 from shared_telemetry_utils import ParserError
 from collections import OrderedDict
@@ -18,11 +19,44 @@ from collections import OrderedDict
 MAX_LABEL_LENGTH = 20
 MAX_LABEL_COUNT = 100
 MIN_CATEGORICAL_BUCKET_COUNT = 50
+NEVER_EXPIRE_STR = "never"
 
 BASE_DOC_URL = ("https://firefox-source-docs.mozilla.org/toolkit/components/"
                 "telemetry/telemetry/")
 HISTOGRAMS_DOC_URL = (BASE_DOC_URL + "collection/histograms.html")
 SCALARS_DOC_URL = (BASE_DOC_URL + "collection/scalars.html")
+
+# Constants for Yaml Definition -> Default Definition
+CATEGORY_NAME_SEP = "."
+YAML_REPRESENTATION_KEY = "representation"
+YAML_UNCHANGED_KEYS = [
+    "bug_numbers",
+    "description",
+    "record_in_processes"
+]
+
+YAML_IN_REPRESENTATION_KEYS = [
+   "kind", "high", "low", "n_buckets", "labels"
+]
+
+YAML_RENAMED_KEYS = {
+    "collect_on_channels": "releaseChannelCollection",
+    "alert_emails": "notification_emails"
+}
+
+def last_collected_in_to_expires_in(version):
+    if version == NEVER_EXPIRE_STR:
+        return version
+    return str(int(version) + 1)
+
+YAML_TRANSFORMED_KEYS = {
+    "expires_in_version": (["last_collected_in_version"], lambda x: last_collected_in_to_expires_in(x["last_collected_in_version"]))
+}
+
+YAML_ADDED_KEYS = [
+    "github_issues"
+]
+
 
 # parse_histograms.py is used by scripts from a mozilla-central build tree
 # and also by outside consumers, such as the telemetry server.  We need
@@ -553,6 +587,43 @@ def from_Histograms_json(filename, strict_type_checks):
     return histograms
 
 
+def yaml_to_default_definition(definition):
+    d = collections.OrderedDict()
+
+    def set_if_exists(defn, key, new_name=None):
+        if new_name is None:
+            new_name = key
+        if k in defn:
+            d[new_name] = defn[key]
+
+    for k in YAML_UNCHANGED_KEYS + YAML_ADDED_KEYS:
+        set_if_exists(definition, k)
+
+    for k in YAML_IN_REPRESENTATION_KEYS:
+        set_if_exists(definition[YAML_REPRESENTATION_KEY], k)
+
+    for name, new_name in YAML_RENAMED_KEYS.items():
+        set_if_exists(definition, k, new_name)
+
+    for name, (required_keys, func) in YAML_TRANSFORMED_KEYS.items():
+        if all([r in definition for r in required_keys]):
+            d[name] = func(definition)
+
+    return d
+
+
+def from_Histograms_yaml(filename, strict_type_checks):
+    with open(filename, 'r') as f:
+        # TODO: Should the yaml error bubble up as-is?
+        yaml_histograms = yaml.load(f)
+
+    return collections.OrderedDict({
+        category + CATEGORY_NAME_SEP + name: yaml_to_default_definition(definition)
+        for category, probes in yaml_histograms.items()
+        for name, definition in probes.items()
+    })
+
+
 def from_UseCounters_conf(filename, strict_type_checks):
     return usecounters.generate_histograms(filename)
 
@@ -572,7 +643,7 @@ def from_nsDeprecatedOperationList(filename, strict_type_checks):
             def add_counter(context):
                 name = 'USE_COUNTER2_DEPRECATED_%s_%s' % (op, context.upper())
                 histograms[name] = {
-                    'expires_in_version': 'never',
+                    'expires_in_version': NEVER_EXPIRE_STR,
                     'kind': 'boolean',
                     'description': 'Whether a %s used %s' % (context, op)
                 }
@@ -584,6 +655,7 @@ def from_nsDeprecatedOperationList(filename, strict_type_checks):
 
 FILENAME_PARSERS = {
     'Histograms.json': from_Histograms_json,
+    'Histograms.yaml': from_Histograms_yaml,
     'nsDeprecatedOperationList.h': from_nsDeprecatedOperationList,
 }
 
